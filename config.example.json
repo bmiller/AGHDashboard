@@ -1,0 +1,16 @@
+{
+    "listenPort": 8199,
+    "cacheTtlSeconds": 60,
+    "adguard": {
+        "baseUrl": "http://192.168.5.30:8080",
+        "username": "",
+        "password": ""
+    },
+    "activity": {
+        "hours": 24,
+        "intervalMinutes": 10,
+        "pageSize": 50000,
+        "maxPages": 10,
+        "maxClients": 24
+    }
+}
