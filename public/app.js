@@ -62,6 +62,20 @@ function timeAgo(iso) {
 
 let lastStatsAt = null;
 let lastActivityAt = null;
+let liveSuffix = "";
+
+function updateServerStatus(stats) {
+    const servers = Array.isArray(stats && stats.servers) ? stats.servers : [];
+    const down = servers.filter((s) => !s.ok);
+    const pill = $("status-pill");
+    if (servers.length > 1 && down.length > 0) {
+        liveSuffix = ` · ${servers.length - down.length}/${servers.length} servers`;
+        pill.title = "Unreachable: " + down.map((s) => s.name).join(", ");
+    } else {
+        liveSuffix = "";
+        pill.removeAttribute("title");
+    }
+}
 
 function setStatus(state, text) {
     const pill = $("status-pill");
@@ -308,6 +322,7 @@ function renderTopList(listId, items, barColor) {
 }
 
 function renderStats(stats) {
+    updateServerStatus(stats);
     const t = stats.totals;
     $("stat-queries").textContent = fmtInt(t.queries);
     $("stat-queries-sub").textContent =
@@ -336,7 +351,7 @@ async function loadStats(firstLoad = false) {
         const stats = await fetchJson("/api/stats");
         renderStats(stats);
         clearError();
-        if (firstLoad) setStatus("ok", "Live");
+        if (firstLoad) setStatus("ok", `Live${liveSuffix}`);
     } catch (err) {
         showError(`Failed to load stats: ${err.message}`);
     }
@@ -396,6 +411,6 @@ setInterval(loadActivity, ACTIVITY_REFRESH_MS);
 
 setInterval(() => {
     if ($("status-pill").classList.contains("ok")) {
-        $("status-text").textContent = `Live · updated ${timeAgo(lastStatsAt)}`;
+        $("status-text").textContent = `Live${liveSuffix} · updated ${timeAgo(lastStatsAt)}`;
     }
 }, 1000);

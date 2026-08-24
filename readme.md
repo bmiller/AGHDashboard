@@ -22,6 +22,7 @@ page load.
 ## How it works
 
 - `server.js` - a zero-dependency Node.js (>= 18) server that:
+  - talks to one or more AdGuard Home instances configured in `config.json` (`servers` array)
   - serves the static frontend from `public/`
   - proxies `/api/stats` to AdGuard Home `/control/stats` (handles both legacy and current
     response formats)
@@ -42,11 +43,15 @@ Copy `config.example.json` to `config.json` and adjust:
 {
     "listenPort": 8199,
     "cacheTtlSeconds": 60,
-    "adguard": {
-        "baseUrl": "http://192.168.5.30:8080",
-        "username": "your-user",
-        "password": "your-password"
-    },
+    "topCounts": { "domains": 10, "clients": 10, "upstreams": 10 },
+    "servers": [
+        {
+            "name": "adguard-1",
+            "baseUrl": "http://192.168.5.30:8080",
+            "username": "your-user",
+            "password": "your-password"
+        }
+    ],
     "activity": {
         "hours": 24,            // window size
         "intervalMinutes": 10,  // bucket size
@@ -59,6 +64,26 @@ Copy `config.example.json` to `config.json` and adjust:
 
 `config.json` is gitignored; credentials never leave the server (the browser only talks to this
 proxy).
+
+### Multiple AdGuard Home servers
+
+Add more entries to the `servers` array and everything is aggregated into one combined view:
+
+- **Stat cards** - query/block counts are summed across servers.
+- **Top tables** - lists are merged, re-ranked by combined count and truncated to `topCounts`.
+- **Average processing time** - weighted by each server's query volume.
+- **Charts** - each server's query log is paginated concurrently and tallied into one shared set
+  of buckets. Clients appearing on several servers are combined under the same label.
+
+If a server is unreachable the dashboard keeps working with the remaining ones: the status pill
+shows e.g. `Live · 1/2 servers` (hover for names) and `/api/stats`, `/api/activity` include
+per-server `servers` status arrays. Only when *all* servers fail does the dashboard show an
+error.
+
+Note: if one instance forwards its queries to another (chained setup), those queries appear in
+both logs and will be double-counted. The aggregation assumes independent instances.
+
+The legacy single-server format (`"adguard": { ... }`) is still accepted for compatibility.
 
 ## Run
 
