@@ -5,10 +5,13 @@
  * AdGuard Home Dashboard - zero-dependency Node.js server
  *
  * - Serves the static frontend from ./public
+ * - Talks to one or more AdGuard Home instances (config `servers` array)
  * - Proxies /api/stats to AdGuard Home /control/stats (normalizes old/new formats)
  * - Aggregates AdGuard query log into 10-minute buckets for the last 24h:
  *     * Total queries (permitted / blocked / cached / other)
  *     * Client activity (per-client stacked series)
+ * - With multiple servers, everything is summed/merged into one combined view;
+ *   if a single instance is unreachable the dashboard keeps working with the rest
  * - Caches aggregated results to avoid hammering AdGuard Home
  */
 
@@ -23,6 +26,45 @@ const PUBLIC_DIR = path.join(ROOT, "public");
 /* Config                                                             */
 /* ------------------------------------------------------------------ */
 
+function hostLabel(baseUrl) {
+    try {
+        return new URL(baseUrl).hostname;
+    } catch (_) {
+        return null;
+    }
+}
+
+/**
+ * Accepts either a `servers: [...]` array or the legacy single `adguard: {...}`
+ * block (wrapped into a one-element list). Each entry may carry its own
+ * name, baseUrl, username, password and timeoutMs.
+ */
+function normalizeServers(user, defaults) {
+    if (Array.isArray(user.servers)) {
+        const servers = user.servers
+            .map((s, i) => ({
+                name: String(s.name || hostLabel(s.baseUrl) || `server-${i + 1}`),
+                baseUrl: String(s.baseUrl || "").replace(/\/+$/, ""),
+                username: s.username ?? "",
+                password: s.password ?? "",
+                timeoutMs: Number(s.timeoutMs) || 30000,
+            }))
+            .filter((s) => s.baseUrl);
+        if (servers.length === 0) console.error("[config] 'servers' array contains no usable entries");
+        return servers;
+    }
+    const a = { ...defaults.adguard, ...(user.adguard || {}) };
+    return [
+        {
+            name: "AdGuard Home",
+            baseUrl: String(a.baseUrl || "").replace(/\/+$/, ""),
+            username: a.username ?? "",
+            password: a.password ?? "",
+            timeoutMs: Number(a.timeoutMs) || 30000,
+        },
+    ];
+}
+
 function loadConfig() {
     const defaults = {
         listenPort: 8199,
@@ -33,6 +75,7 @@ function loadConfig() {
             timeoutMs: 30000,
         },
         cacheTtlSeconds: 60,
+        topCounts: { domains: 10, clients: 10, upstreams: 10 },
         activity: {
             hours: 24,
             intervalMinutes: 10,
@@ -55,15 +98,23 @@ function loadConfig() {
         process.exit(1);
     }
 
-    return {
+    const cfg = {
         listenPort: user.listenPort ?? defaults.listenPort,
         cacheTtlSeconds: user.cacheTtlSeconds ?? defaults.cacheTtlSeconds,
-        adguard: { ...defaults.adguard, ...(user.adguard || {}) },
+        topCounts: { ...defaults.topCounts, ...(user.topCounts || {}) },
         activity: { ...defaults.activity, ...(user.activity || {}) },
+        servers: [],
     };
+    cfg.servers = normalizeServers(user, defaults);
+    return cfg;
 }
 
 const CONFIG = loadConfig();
+
+if (!Array.isArray(CONFIG.servers) || CONFIG.servers.length === 0) {
+    console.error("[config] no AdGuard Home servers configured (see config.example.json)");
+    process.exit(1);
+}
 
 /* ------------------------------------------------------------------ */
 /* Small helpers                                                      */
@@ -85,16 +136,13 @@ function parseTimestampMs(ts) {
     return ms;
 }
 
-async function aghFetch(apiPath) {
-    const base = CONFIG.adguard.baseUrl.replace(/\/+$/, "");
-    const auth = Buffer.from(
-        `${CONFIG.adguard.username}:${CONFIG.adguard.password}`
-    ).toString("base64");
+async function aghFetch(server, apiPath) {
+    const auth = Buffer.from(`${server.username}:${server.password}`).toString("base64");
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), CONFIG.adguard.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), server.timeoutMs);
     try {
-        const res = await fetch(base + apiPath, {
+        const res = await fetch(server.baseUrl + apiPath, {
             headers: { Authorization: `Basic ${auth}`, Accept: "application/json" },
             signal: controller.signal,
         });
@@ -111,23 +159,23 @@ class ApiError extends Error {
     }
 }
 
-async function aghJson(apiPath) {
+async function aghJson(server, apiPath) {
     let res;
     try {
-        res = await aghFetch(apiPath);
+        res = await aghFetch(server, apiPath);
     } catch (err) {
-        throw new ApiError(502, `Cannot reach AdGuard Home at ${CONFIG.adguard.baseUrl}: ${err.message}`);
+        throw new ApiError(502, `Cannot reach ${server.name} at ${server.baseUrl}: ${err.message}`);
     }
     if (res.status === 401 || res.status === 403) {
-        throw new ApiError(502, "AdGuard Home rejected credentials (check username/password in config.json)");
+        throw new ApiError(502, `${server.name} rejected credentials (check username/password in config.json)`);
     }
     if (!res.ok) {
-        throw new ApiError(502, `AdGuard Home returned HTTP ${res.status} for ${apiPath}`);
+        throw new ApiError(502, `${server.name} returned HTTP ${res.status} for ${apiPath}`);
     }
     try {
         return await res.json();
     } catch (err) {
-        throw new ApiError(502, `Invalid JSON from AdGuard Home for ${apiPath}`);
+        throw new ApiError(502, `Invalid JSON from ${server.name} for ${apiPath}`);
     }
 }
 
@@ -189,14 +237,85 @@ function normalizeStats(raw) {
             safebrowsing: firstArray(raw, ["replaced_safebrowsing", "num_replaced_safebrowsing_per_hour"]).map(Number),
             parental: firstArray(raw, ["replaced_parental", "num_replaced_parental_per_hour"]).map(Number),
         },
-        topQueried: normalizeTopList(raw.top_queried_domains, "domain").slice(0, CONFIG.topCounts?.domains ?? 10),
-        topBlocked: normalizeTopList(raw.top_blocked_domains, "domain").slice(0, CONFIG.topCounts?.domains ?? 10),
+        // Untruncated; size limits are applied after merging across servers.
+        topQueried: normalizeTopList(raw.top_queried_domains, "domain"),
+        topBlocked: normalizeTopList(raw.top_blocked_domains, "domain"),
         topClients: normalizeTopList(raw.top_clients, "ip"),
         topUpstreams: normalizeTopList(raw.top_upstreams_responses, "ip"),
     };
 }
 
+/** Element-wise sum of numeric arrays of possibly different lengths. */
+function sumArrays(arrays) {
+    const len = arrays.reduce((m, a) => Math.max(m, a.length), 0);
+    const out = new Array(len).fill(0);
+    for (const a of arrays) {
+        for (let i = 0; i < a.length; i++) out[i] += Number(a[i]) || 0;
+    }
+    return out;
+}
+
+/** Merge {name,count} lists from several servers: sum by name, re-rank, then truncate. */
+function mergeTopLists(lists, limit) {
+    const acc = new Map();
+    for (const list of lists) {
+        for (const it of list) acc.set(it.name, (acc.get(it.name) || 0) + it.count);
+    }
+    return [...acc.entries()]
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, limit);
+}
+
+function aggregateStats(results) {
+    const okResults = results.filter((r) => r.ok);
+    const norm = okResults.map((r) => normalizeStats(r.raw));
+
+    const totals = { queries: 0, blocked: 0, safebrowsing: 0, parental: 0 };
+    let wProd = 0;
+    let wSum = 0;
+    let plainSum = 0;
+    for (const n of norm) {
+        totals.queries += n.totals.queries;
+        totals.blocked += n.totals.blocked;
+        totals.safebrowsing += n.totals.safebrowsing;
+        totals.parental += n.totals.parental;
+        wProd += n.totals.avgProcessingTimeMs * n.totals.queries;
+        wSum += n.totals.queries;
+        plainSum += n.totals.avgProcessingTimeMs;
+    }
+    // Query-weighted mean processing time; simple mean as fallback when no queries were reported.
+    totals.avgProcessingTimeMs =
+        wSum > 0 ? Math.round(wProd / wSum) : norm.length > 0 ? Math.round(plainSum / norm.length) : 0;
+
+    const tc = CONFIG.topCounts;
+    return {
+        totals,
+        hourly: {
+            queries: sumArrays(norm.map((n) => n.hourly.queries)),
+            blocked: sumArrays(norm.map((n) => n.hourly.blocked)),
+            safebrowsing: sumArrays(norm.map((n) => n.hourly.safebrowsing)),
+            parental: sumArrays(norm.map((n) => n.hourly.parental)),
+        },
+        topQueried: mergeTopLists(norm.map((n) => n.topQueried), tc.domains),
+        topBlocked: mergeTopLists(norm.map((n) => n.topBlocked), tc.domains),
+        topClients: mergeTopLists(norm.map((n) => n.topClients), tc.clients),
+        topUpstreams: mergeTopLists(norm.map((n) => n.topUpstreams), tc.upstreams),
+        generatedAt: new Date().toISOString(),
+        servers: results.map(({ name, ok, error }) => ({ name, ok, error })),
+    };
+}
+
 let statsCache = { data: null, expires: 0, inflight: null };
+
+async function fetchServerStats(server) {
+    try {
+        const raw = await aghJson(server, "/control/stats");
+        return { name: server.name, ok: true, raw, error: null };
+    } catch (err) {
+        return { name: server.name, ok: false, raw: null, error: err.message };
+    }
+}
 
 async function getStats() {
     const now = Date.now();
@@ -204,8 +323,15 @@ async function getStats() {
     if (statsCache.inflight) return statsCache.inflight;
 
     statsCache.inflight = (async () => {
-        const raw = await aghJson("/control/stats");
-        const data = { ...normalizeStats(raw), generatedAt: new Date().toISOString() };
+        const results = await Promise.all(CONFIG.servers.map(fetchServerStats));
+        if (!results.some((r) => r.ok)) {
+            throw new ApiError(502, results.map((r) => `${r.name}: ${r.error}`).join("; "));
+        }
+        const down = results.filter((r) => !r.ok);
+        if (down.length > 0) {
+            console.warn(`[stats] some servers unreachable: ${down.map((r) => `${r.name}: ${r.error}`).join("; ")}`);
+        }
+        const data = aggregateStats(results);
         statsCache = { data, expires: Date.now() + CONFIG.cacheTtlSeconds * 1000, inflight: null };
         return data;
     })();
@@ -259,18 +385,23 @@ async function getActivity() {
     return activityCache.inflight;
 }
 
-async function computeActivity() {
-    const { hours, intervalMinutes, pageSize, maxPages, maxClients } = CONFIG.activity;
+/** Shared time window so all servers are bucketed identically. */
+function makeWindow(hours, intervalMinutes) {
     const bucketMs = intervalMinutes * 60000;
     const bucketCount = Math.round((hours * 60) / intervalMinutes);
-
     // Buckets are aligned to absolute clock boundaries so bucket starts land on :00/:10/:20...
     const lastBucketStart = Math.floor(Date.now() / bucketMs) * bucketMs;
     const windowStart = lastBucketStart - (bucketCount - 1) * bucketMs;
     const windowEnd = lastBucketStart + bucketMs;
+    return { bucketMs, bucketCount, windowStart, windowEnd };
+}
+
+/** Page through one server's query log and tally it into the shared window buckets. */
+async function collectServerActivity(server, win, activityCfg) {
+    const { pageSize, maxPages } = activityCfg;
 
     const segments = { permitted: null, blocked: null, cached: null, other: null };
-    for (const k of Object.keys(segments)) segments[k] = new Float64Array(bucketCount);
+    for (const k of Object.keys(segments)) segments[k] = new Float64Array(win.bucketCount);
     const clientBuckets = new Map(); // label -> Float64Array(bucketCount)
 
     let olderThan = null;
@@ -282,7 +413,7 @@ async function computeActivity() {
         let url = `/control/querylog?limit=${pageSize}&response_status=all`;
         if (olderThan) url += `&older_than=${encodeURIComponent(olderThan)}`;
 
-        const payload = await aghJson(url);
+        const payload = await aghJson(server, url);
         const entries = Array.isArray(payload.data) ? payload.data : [];
         if (entries.length === 0) {
             complete = true;
@@ -294,18 +425,18 @@ async function computeActivity() {
             const t = parseTimestampMs(e.time);
             if (t === null) continue;
             if (oldestSeenMs === null || t < oldestSeenMs) oldestSeenMs = t;
-            if (t < windowStart) {
+            if (t < win.windowStart) {
                 reachedCutoff = true;
                 break; // entries arrive newest-first; everything after is older
             }
-            const idx = Math.floor((t - windowStart) / bucketMs);
-            if (idx < 0 || idx >= bucketCount) continue;
+            const idx = Math.floor((t - win.windowStart) / win.bucketMs);
+            if (idx < 0 || idx >= win.bucketCount) continue;
 
             segments[classifyEntry(e)][idx] += 1;
             const label = clientLabel(e);
             let row = clientBuckets.get(label);
             if (!row) {
-                row = new Float64Array(bucketCount);
+                row = new Float64Array(win.bucketCount);
                 clientBuckets.set(label, row);
             }
             row[idx] += 1;
@@ -322,6 +453,81 @@ async function computeActivity() {
         olderThan = lastTime;
     }
 
+    return { segments, clientBuckets, scanned, complete, oldestSeenMs };
+}
+
+function mergeClientBuckets(maps, bucketCount) {
+    const merged = new Map();
+    for (const map of maps) {
+        for (const [label, row] of map) {
+            let dst = merged.get(label);
+            if (!dst) {
+                dst = new Float64Array(bucketCount);
+                merged.set(label, dst);
+            }
+            for (let b = 0; b < bucketCount; b++) dst[b] += row[b];
+        }
+    }
+    return merged;
+}
+
+async function computeActivity() {
+    const cfg = CONFIG.activity;
+    const win = makeWindow(cfg.hours, cfg.intervalMinutes);
+
+    // All servers are collected concurrently; each has its own pagination cursor.
+    const settled = await Promise.allSettled(CONFIG.servers.map((s) => collectServerActivity(s, win, cfg)));
+
+    const collected = [];
+    const failed = [];
+    settled.forEach((r, i) => {
+        const name = CONFIG.servers[i].name;
+        if (r.status === "fulfilled") {
+            collected.push({ name, ...r.value });
+        } else {
+            failed.push({
+                name,
+                error: r.reason instanceof Error ? r.reason.message : String(r.reason),
+            });
+        }
+    });
+
+    if (collected.length === 0) {
+        throw new ApiError(502, failed.map((f) => `${f.name}: ${f.error}`).join("; "));
+    }
+    if (failed.length > 0) {
+        console.warn(`[activity] some servers unavailable: ${failed.map((f) => `${f.name}: ${f.error}`).join("; ")}`);
+    }
+
+    // Merge segment buckets.
+    const segments = {};
+    for (const key of Object.keys(collected[0].segments)) {
+        const acc = new Float64Array(win.bucketCount);
+        for (const c of collected) {
+            for (let b = 0; b < win.bucketCount; b++) acc[b] += c.segments[key][b];
+        }
+        segments[key] = acc;
+    }
+
+    // Merge per-client buckets; clients with the same label on both servers are combined.
+    const clientBuckets = mergeClientBuckets(
+        collected.map((c) => c.clientBuckets),
+        win.bucketCount
+    );
+
+    let scanned = 0;
+    let complete = true;
+    let oldestSeenMs = null;
+    for (const c of collected) {
+        scanned += c.scanned;
+        complete = complete && c.complete;
+        if (c.oldestSeenMs !== null && (oldestSeenMs === null || c.oldestSeenMs < oldestSeenMs)) {
+            oldestSeenMs = c.oldestSeenMs;
+        }
+    }
+    // With a server missing we can't claim full coverage even if the rest completed.
+    if (failed.length > 0) complete = false;
+
     // Assemble per-client matrix, sorted by volume desc; merge tail into "Other clients"
     const clientTotals = [...clientBuckets.entries()]
         .map(([name, row]) => [name, row, row.reduce((a, b) => a + b, 0)])
@@ -331,22 +537,22 @@ async function computeActivity() {
     const rows = [];
     let otherRow = null;
     clientTotals.forEach(([name, row], i) => {
-        if (i < maxClients) {
+        if (i < cfg.maxClients) {
             names.push(name);
             rows.push(Array.from(row));
         } else {
             if (!otherRow) {
-                otherRow = new Float64Array(bucketCount);
+                otherRow = new Float64Array(win.bucketCount);
                 names.push("Other clients");
             }
-            for (let b = 0; b < bucketCount; b++) otherRow[b] += row[b];
+            for (let b = 0; b < win.bucketCount; b++) otherRow[b] += row[b];
         }
     });
     if (otherRow) rows.push(Array.from(otherRow));
 
-    const total = new Float64Array(bucketCount);
+    const total = new Float64Array(win.bucketCount);
     for (const seg of Object.values(segments)) {
-        for (let b = 0; b < bucketCount; b++) total[b] += seg[b];
+        for (let b = 0; b < win.bucketCount; b++) total[b] += seg[b];
     }
 
     const grandTotal = total.reduce((a, b) => a + b, 0);
@@ -357,11 +563,11 @@ async function computeActivity() {
 
     return {
         generatedAt: new Date().toISOString(),
-        windowHours: hours,
-        bucketMinutes: intervalMinutes,
-        bucketCount,
-        bucketStartsMs: Array.from({ length: bucketCount }, (_, i) => windowStart + i * bucketMs),
-        windowEndMs: windowEnd,
+        windowHours: cfg.hours,
+        bucketMinutes: cfg.intervalMinutes,
+        bucketCount: win.bucketCount,
+        bucketStartsMs: Array.from({ length: win.bucketCount }, (_, i) => win.windowStart + i * win.bucketMs),
+        windowEndMs: win.windowEnd,
         series: {
             permitted: Array.from(segments.permitted),
             blocked: Array.from(segments.blocked),
@@ -381,10 +587,18 @@ async function computeActivity() {
                     complete
                         ? 100
                         : oldestSeenMs
-                          ? Math.round(((windowEnd - Math.max(oldestSeenMs, windowStart)) / (windowEnd - windowStart)) * 100)
+                          ? Math.round(
+                                ((win.windowEnd - Math.max(oldestSeenMs, win.windowStart)) /
+                                    (win.windowEnd - win.windowStart)) *
+                                    100
+                            )
                           : 0
                 )
             ),
+            servers: [
+                ...collected.map((c) => ({ name: c.name, ok: true, error: null })),
+                ...failed.map((f) => ({ name: f.name, ok: false, error: f.error })),
+            ],
         },
     };
 }
@@ -450,7 +664,11 @@ const server = http.createServer(async (req, res) => {
             const data = await getActivity();
             sendJson(res, 200, data);
         } else if (url.pathname === "/api/health") {
-            sendJson(res, 200, { ok: true, uptimeSec: Math.round(process.uptime()) });
+            sendJson(res, 200, {
+                ok: true,
+                uptimeSec: Math.round(process.uptime()),
+                servers: CONFIG.servers.map((s) => ({ name: s.name, baseUrl: s.baseUrl })),
+            });
         } else if (url.pathname.startsWith("/api/")) {
             sendJson(res, 404, { error: "Unknown API endpoint" });
         } else {
@@ -469,7 +687,9 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(CONFIG.listenPort, () => {
     console.log(`AdGuard Home dashboard listening on http://localhost:${CONFIG.listenPort}`);
-    console.log(`Upstream AdGuard Home: ${CONFIG.adguard.baseUrl} (user: ${CONFIG.adguard.username || "<none>"})`);
+    for (const s of CONFIG.servers) {
+        console.log(`Upstream AdGuard Home "${s.name}": ${s.baseUrl} (user: ${s.username || "<none>"})`);
+    }
 
     // Warm caches at startup and keep them fresh in the background so that
     // browser requests are almost always served from cache.
