@@ -31,9 +31,9 @@
     --accent-adult: #a870b2;
 
     /* Pi-hole chart segment colors (unchanged between themes) */
-    --seg-permitted: #00a65a;
-    --seg-blocked: #b00000;
-    --seg-cached: #99beee;
+    --seg-permitted: #13ad55;
+    --seg-blocked: #77281e;
+    --seg-cached: #3c5991;
     --seg-other: #908878;
 }
 

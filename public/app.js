@@ -16,11 +16,16 @@ const THEME_COLORS = [
 ];
 
 const SEGMENTS = [
-    { key: "permitted", label: "Permitted", color: "#00a65a" },
-    { key: "blocked", label: "Blocked", color: "#b00000" },
-    { key: "cached", label: "Cached", color: "#99beee" },
-    { key: "other", label: "Other", color: "#908878" },
+    { key: "permitted", label: "Permitted" },
+    { key: "blocked", label: "Blocked" },
+    { key: "cached", label: "Cached" },
+    { key: "other", label: "Other" },
 ];
+
+// Segment colors live in style.css (`--seg-*` variables), so restyling is a pure CSS edit.
+function segColor(key) {
+    return cssVar(`--seg-${key}`);
+}
 
 const STATS_REFRESH_MS = 5000;
 const ACTIVITY_REFRESH_MS = 60000;
@@ -155,14 +160,13 @@ function makeExternalTooltip(chartId, titleFn) {
 
         el.style.opacity = 1;
 
-        // Position above the caret, clamped within the canvas (page coordinates,
-        // so it survives scrolling).
+        // Position along the bottom edge of the chart, clamped within the canvas
+        // (page coordinates, so it survives scrolling).
         const canvasRect = chart.canvas.getBoundingClientRect();
         const sx = window.scrollX;
         const sy = window.scrollY;
         const caretX = canvasRect.left + sx + tooltip.caretX;
         const width = el.offsetWidth;
-        const height = el.offsetHeight;
 
         let left = caretX - width / 2;
         const minLeft = canvasRect.left + sx + 4;
@@ -170,7 +174,7 @@ function makeExternalTooltip(chartId, titleFn) {
         left = Math.max(minLeft, Math.min(left, maxLeft));
 
         el.style.left = `${left}px`;
-        el.style.top = `${canvasRect.top + sy - height - 12}px`;
+        el.style.top = `${canvasRect.bottom + sy - 20}px`;
     };
 }
 
@@ -236,7 +240,7 @@ function baseOptions(chartId, kind) {
             tooltip: {
                 enabled: false,
                 intersect: false,
-                yAlign: "top",
+                yAlign: "bottom",
                 external: makeExternalTooltip(chartId, rangeTitle(kind)),
             },
         },
@@ -270,7 +274,7 @@ function updateCharts(data, firstLoad) {
     SEGMENTS.forEach((seg, i) => {
         const ds = totalQueriesChart.data.datasets[i];
         ds.label = seg.label;
-        ds.backgroundColor = seg.color;
+        ds.backgroundColor = segColor(seg.key);
         ds.data = data.series[seg.key];
     });
 
@@ -336,9 +340,9 @@ function renderStats(stats) {
 
     $("avg-processing").textContent = `Average processing time: ${t.avgProcessingTimeMs} ms`;
 
-    renderTopList("list-top-domains", stats.topQueried, "#99beee");
-    renderTopList("list-top-blocked", stats.topBlocked, "#b00000");
-    renderTopList("list-top-clients", stats.topClients, "#00a65a");
+    renderTopList("list-top-domains", stats.topQueried, segColor("cached"));
+    renderTopList("list-top-blocked", stats.topBlocked, segColor("blocked"));
+    renderTopList("list-top-clients", stats.topClients, segColor("permitted"));
     renderTopList("list-upstreams", stats.topUpstreams, "#4a7fb5");
 
     lastStatsAt = stats.generatedAt;
