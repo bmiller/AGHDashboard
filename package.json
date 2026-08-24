@@ -1,0 +1,13 @@
+{
+    "name": "adguard-home-dashboard",
+    "version": "1.0.0",
+    "description": "Standalone dashboard for AdGuard Home with Pi-hole style Total queries / Client activity bar charts (24h, 10-minute buckets)",
+    "main": "server.js",
+    "scripts": {
+        "start": "node server.js"
+    },
+    "engines": {
+        "node": ">=18"
+    },
+    "license": "MIT"
+}
