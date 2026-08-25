@@ -359,9 +359,14 @@ function classifyEntry(entry) {
 }
 
 function clientLabel(entry) {
+    const ip = String(entry.client || "").trim();
     const infoName = entry.client_info && entry.client_info.name;
-    if (infoName && String(infoName).trim()) return String(infoName).trim();
-    return String(entry.client || "unknown");
+    const name = infoName ? String(infoName).trim() : "";
+    if (!name) return ip || "unknown";
+    // AGH sometimes reports a VLAN description (e.g. "Core VLAN") instead of
+    // a hostname; those are ambiguous across clients, so show the IP instead.
+    if (/vlan/i.test(name)) return ip || name;
+    return name;
 }
 
 let activityCache = { data: null, expires: 0, inflight: null };
