@@ -396,6 +396,17 @@ function makeWindow(hours, intervalMinutes) {
     return { bucketMs, bucketCount, windowStart, windowEnd };
 }
 
+// AdGuard Home sometimes answers a perfectly valid older_than page with an
+// empty result (its query-log seek can fail transiently, e.g. while entries
+// are being appended or around log rotation). Such a page must not be
+// mistaken for the end of the log, or the charts lose their oldest hours.
+const EMPTY_PAGE_RETRIES = 2;
+const EMPTY_PAGE_RETRY_DELAY_MS = 500;
+
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Page through one server's query log and tally it into the shared window buckets. */
 async function collectServerActivity(server, win, activityCfg) {
     const { pageSize, maxPages } = activityCfg;
@@ -408,17 +419,31 @@ async function collectServerActivity(server, win, activityCfg) {
     let scanned = 0;
     let complete = false;
     let oldestSeenMs = null;
+    let emptyRetriesLeft = EMPTY_PAGE_RETRIES;
 
-    for (let page = 0; page < maxPages; page++) {
+    let pagesUsed = 0;
+    while (pagesUsed < maxPages) {
         let url = `/control/querylog?limit=${pageSize}&response_status=all`;
         if (olderThan) url += `&older_than=${encodeURIComponent(olderThan)}`;
 
         const payload = await aghJson(server, url);
         const entries = Array.isArray(payload.data) ? payload.data : [];
         if (entries.length === 0) {
-            complete = true;
+            if (emptyRetriesLeft > 0) {
+                // Could be a transient empty response rather than the real
+                // end of the log; ask again before concluding anything.
+                emptyRetriesLeft--;
+                await sleep(EMPTY_PAGE_RETRY_DELAY_MS);
+                continue;
+            }
+            // Out of retries. An empty very first page genuinely means the
+            // log holds no entries at all; an empty page after a cursor means
+            // we stopped short of windowStart and must not claim completion.
+            if (olderThan === null) complete = true;
             break;
         }
+        emptyRetriesLeft = EMPTY_PAGE_RETRIES;
+        pagesUsed++;
 
         let reachedCutoff = false;
         for (const e of entries) {
@@ -556,9 +581,28 @@ async function computeActivity() {
     }
 
     const grandTotal = total.reduce((a, b) => a + b, 0);
-    if (grandTotal === 0 && !complete) {
-        // Nothing usable was collected and we did not reach the window start.
-        console.warn("[activity] window not fully covered by available data");
+    const coveragePercent = Math.max(
+        0,
+        Math.min(
+            100,
+            complete
+                ? 100
+                : oldestSeenMs
+                  ? Math.round(
+                        ((win.windowEnd - Math.max(oldestSeenMs, win.windowStart)) /
+                            (win.windowEnd - win.windowStart)) *
+                            100
+                    )
+                  : 0
+        )
+    );
+    if (!complete) {
+        // A server failed, pagination hit maxPages, or AGH kept returning
+        // empty pages before the window start was reached.
+        console.warn(
+            `[activity] ${cfg.hours}h window not fully covered: ~${coveragePercent}% coverage, ` +
+                `${scanned} entries scanned${grandTotal === 0 ? ", none collected" : ""}`
+        );
     }
 
     return {
@@ -580,21 +624,7 @@ async function computeActivity() {
             entriesScanned: scanned,
             complete,
             oldestEntryMs: oldestSeenMs,
-            coveragePercent: Math.max(
-                0,
-                Math.min(
-                    100,
-                    complete
-                        ? 100
-                        : oldestSeenMs
-                          ? Math.round(
-                                ((win.windowEnd - Math.max(oldestSeenMs, win.windowStart)) /
-                                    (win.windowEnd - win.windowStart)) *
-                                    100
-                            )
-                          : 0
-                )
-            ),
+            coveragePercent,
             servers: [
                 ...collected.map((c) => ({ name: c.name, ok: true, error: null })),
                 ...failed.map((f) => ({ name: f.name, ok: false, error: f.error })),
