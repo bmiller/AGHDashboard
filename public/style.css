@@ -292,7 +292,7 @@ html[data-theme='dark'] .icon-moon { display: none; }
 
 .chart-wrap {
     position: relative;
-    height: 300px;
+    height: 260px;
 }
 
 .chart-overlay {
