@@ -242,6 +242,8 @@ function normalizeStats(raw) {
         topBlocked: normalizeTopList(raw.top_blocked_domains, "domain"),
         topClients: normalizeTopList(raw.top_clients, "ip"),
         topUpstreams: normalizeTopList(raw.top_upstreams_responses, "ip"),
+        // "count" holds the average response time in seconds for this list.
+        topUpstreamsAvgTime: normalizeTopList(raw.top_upstreams_avg_time, "ip"),
     };
 }
 
@@ -288,6 +290,25 @@ function aggregateStats(results) {
     totals.avgProcessingTimeMs =
         wSum > 0 ? Math.round(wProd / wSum) : norm.length > 0 ? Math.round(plainSum / norm.length) : 0;
 
+    // Merge per-upstream average response times, weighted by response counts,
+    // then convert seconds -> ms. Only upstreams present in topUpstreams are kept.
+    const upTimeAcc = new Map();
+    for (const n of norm) {
+        const countByName = new Map(n.topUpstreams.map((u) => [u.name, u.count]));
+        for (const t of n.topUpstreamsAvgTime) {
+            const weight = countByName.get(t.name);
+            if (!weight || weight <= 0 || !(t.count > 0)) continue;
+            const acc = upTimeAcc.get(t.name) || { sum: 0, weight: 0 };
+            acc.sum += t.count * weight;
+            acc.weight += weight;
+            upTimeAcc.set(t.name, acc);
+        }
+    }
+    const upstreamAvgTimesMs = {};
+    for (const [name, acc] of upTimeAcc) {
+        upstreamAvgTimesMs[name] = Math.round((acc.sum / acc.weight) * 1000);
+    }
+
     const tc = CONFIG.topCounts;
     return {
         totals,
@@ -301,6 +322,7 @@ function aggregateStats(results) {
         topBlocked: mergeTopLists(norm.map((n) => n.topBlocked), tc.domains),
         topClients: mergeTopLists(norm.map((n) => n.topClients), tc.clients),
         topUpstreams: mergeTopLists(norm.map((n) => n.topUpstreams), tc.upstreams),
+        upstreamAvgTimesMs,
         generatedAt: new Date().toISOString(),
         servers: results.map(({ name, ok, error }) => ({ name, ok, error })),
     };
