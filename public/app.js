@@ -345,6 +345,26 @@ function renderStats(stats) {
     renderTopList("list-top-clients", stats.topClients, segColor("permitted"));
     renderTopList("list-upstreams", stats.topUpstreams, "#4a7fb5");
 
+    const avgTimes = stats.upstreamAvgTimesMs || {};
+    const rtNames = Object.keys(avgTimes)
+        .filter((name) => stats.topUpstreams.some((u) => u.name === name))
+        .sort((a, b) => avgTimes[b] - avgTimes[a]);
+    const rtEl = $("upstream-response-times");
+    if (rtNames.length === 0) {
+        rtEl.innerHTML = "&nbsp;";
+    } else {
+        // Fixed-width name column (in ch units, monospace font) so times line up.
+        const nameCh = Math.max(...rtNames.map((n) => n.length)) + 2;
+        rtEl.innerHTML = rtNames
+            .map(
+                (name) =>
+                    `<div class="rt-line" style="--rt-name-ch:${nameCh}ch">` +
+                    `<span class="rt-name">${escapeHtml(name)}:</span>` +
+                    `<span>${avgTimes[name]} ms</span></div>`
+            )
+            .join("");
+    }
+
     lastStatsAt = stats.generatedAt;
 }
 

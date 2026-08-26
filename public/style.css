@@ -377,6 +377,24 @@ html[data-theme='dark'] .icon-moon { display: none; }
     font-size: 12.5px;
 }
 
+/* Per-upstream response-time lines under "Average processing time". The name
+   column width is set per-render via --rt-name-ch so the times align. */
+#upstream-response-times {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace;
+}
+
+#upstream-response-times .rt-line {
+    display: flex;
+}
+
+#upstream-response-times .rt-name {
+    flex: none;
+    width: var(--rt-name-ch, 18ch);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .page-foot {
     margin-top: 22px;
     text-align: center;
