@@ -31,6 +31,11 @@ page load.
     per-client counts
   - caches both endpoints (`cacheTtlSeconds`) and pre-warms the aggregation at startup so browser
     requests are served instantly
+
+  The implementation is split across `lib/`: `config.js` (config loading + defaults),
+  `util.js` (errors, timestamp parsing), `agh.js` (AdGuard Home HTTP client), `stats.js`
+  (`/control/stats` normalization + cached `getStats()`) and `activity.js` (query-log
+  bucketing + cached `getActivity()`). Pure helpers are covered by `npm test` (`node --test`).
 - `public/` - single-page frontend using a locally vendored Chart.js 4.5.1 (the same version
   Pi-hole uses). Chart layout, tooltips and colors are modeled on the Pi-hole web UI
   (`pi-hole/web` `scripts/js/index.js` and `scripts/js/charts.js`).
@@ -98,7 +103,7 @@ Then open http://localhost:8199/
 
 - The first aggregation after startup takes a few seconds (it pages through ~90k query-log
   entries on a busy network); afterwards it is cached and refreshed in the background.
-- Stats refresh every 5 s, charts every 60 s.
+- Stats refresh every 10 s, charts every 60 s.
 - AdGuard Home's own 24 h statistics are used for the stat cards and top tables, so those numbers
   match the built-in dashboard exactly. The bar charts are computed independently from the query
   log, so they may differ from AdGuard's hourly stats by well under 1% due to differing window

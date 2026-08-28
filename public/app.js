@@ -16,7 +16,7 @@
 // so colors stay stable across refreshes.
 const THEME_COLORS = [
     "#f56954", "#3c8dbc", "#00a65a", "#00c0ef", "#f39c12", "#0073b7",
-    "#001f3f", "#39cccc", "#3d9970", "#01ff70", "#ff851b", "#f012be",
+    "#5b8def", "#39cccc", "#3d9970", "#01ff70", "#ff851b", "#f012be",
     "#8e24aa", "#d81b60", "#7cb342", "#c0703b", "#5c6bc0", "#26a69a",
     "#ec407a", "#ab47bc", "#ffa726", "#66bb6a", "#29b6f6", "#8d6e63",
     "#bdbd3a", "#546e7a", "#d4a017", "#5d4037", "#00897b", "#c2185b",
@@ -41,7 +41,7 @@ function segColor(key) {
     return cssVar(`--seg-${key}`);
 }
 
-const STATS_REFRESH_MS = 5000;
+const STATS_REFRESH_MS = 10000;
 const ACTIVITY_REFRESH_MS = 60000;
 
 /* ---------------- Small utilities ---------------- */
