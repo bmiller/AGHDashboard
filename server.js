@@ -427,7 +427,13 @@ function clientLabel(entry) {
     return name;
 }
 
-let activityCache = { data: null, expires: 0, inflight: null };
+let activityCache = { data: null, expires: 0, inflight: null, lastComplete: null };
+
+// How long a previously-complete dataset may keep standing in for incomplete
+// refreshes. Past this the (partial) fresh data is shown rather than something
+// visibly stale. A couple of refresh cycles is plenty to ride out a transient
+// query-log paging failure.
+const STALE_FALLBACK_MAX_MS = 15 * 60 * 1000;
 
 async function getActivity() {
     const now = Date.now();
@@ -435,8 +441,26 @@ async function getActivity() {
     if (activityCache.inflight) return activityCache.inflight;
 
     activityCache.inflight = computeActivity().then(
-        (data) => {
-            activityCache = { data, expires: Date.now() + CONFIG.cacheTtlSeconds * 1000, inflight: null };
+        (fresh) => {
+            const ttl = CONFIG.cacheTtlSeconds * 1000;
+            const prev = activityCache.lastComplete;
+            let data = fresh;
+
+            if (!fresh.meta.complete && prev && Date.now() - Date.parse(prev.generatedAt) < STALE_FALLBACK_MAX_MS) {
+                // This refresh came back partial (a query-log page failed, or a
+                // server was down). Keep showing the last full dataset and try
+                // again on the next cycle rather than dropping hours from the
+                // charts.
+                console.warn("[activity] refresh incomplete; keeping last complete dataset");
+                data = prev;
+            }
+
+            activityCache = {
+                data,
+                expires: Date.now() + ttl,
+                inflight: null,
+                lastComplete: fresh.meta.complete ? fresh : prev,
+            };
             return data;
         },
         (err) => {
