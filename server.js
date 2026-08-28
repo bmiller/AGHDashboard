@@ -273,6 +273,12 @@ function aggregateStats(results) {
     const okResults = results.filter((r) => r.ok);
     const norm = okResults.map((r) => normalizeStats(r.raw));
 
+    // Resolve top-client IPs to their configured names (falls back to the IP).
+    const clientNames = Object.assign({}, ...okResults.map((r) => r.clientNames || {}));
+    for (const n of norm) {
+        n.topClients = n.topClients.map((c) => ({ ...c, name: clientNames[c.name] || c.name }));
+    }
+
     const totals = { queries: 0, blocked: 0, safebrowsing: 0, parental: 0 };
     let wProd = 0;
     let wSum = 0;
@@ -333,10 +339,40 @@ let statsCache = { data: null, expires: 0, inflight: null };
 async function fetchServerStats(server) {
     try {
         const raw = await aghJson(server, "/control/stats");
-        return { name: server.name, ok: true, raw, error: null };
+        // Best-effort: resolve client IPs to their configured names, matching
+        // what the Client Activity tooltip shows. A failure here is non-fatal.
+        let clientNames = {};
+        try {
+            clientNames = buildClientNameMap(await aghJson(server, "/control/clients"));
+        } catch (err) {
+            console.warn(`[stats] ${server.name}: could not load client names: ${err.message}`);
+        }
+        return { name: server.name, ok: true, raw, clientNames, error: null };
     } catch (err) {
-        return { name: server.name, ok: false, raw: null, error: err.message };
+        return { name: server.name, ok: false, raw: null, clientNames: {}, error: err.message };
     }
+}
+
+/** Map client IP -> display name from AGH's /control/clients (persistent + auto-discovered). */
+function buildClientNameMap(payload) {
+    const map = {};
+    const isIp = (s) => /^[0-9.]+$/.test(s) || /:/.test(s);
+    const add = (id, name) => {
+        const ip = String(id || "").trim();
+        const nm = String(name || "").trim();
+        if (!ip || !nm || !isIp(ip) || /vlan/i.test(nm)) return;
+        map[ip] = nm;
+    };
+    if (payload && Array.isArray(payload.auto_clients)) {
+        for (const c of payload.auto_clients) add(c.ip, c.name);
+    }
+    // Persistent clients win over auto-discovered ones.
+    if (payload && Array.isArray(payload.clients)) {
+        for (const c of payload.clients) {
+            for (const id of c.ids || []) add(id, c.name);
+        }
+    }
+    return map;
 }
 
 async function getStats() {
