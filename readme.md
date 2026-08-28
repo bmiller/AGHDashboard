@@ -42,6 +42,7 @@ Copy `config.example.json` to `config.json` and adjust:
 ```json
 {
     "listenPort": 8199,
+    "listenHost": "0.0.0.0",    // bind address; use "127.0.0.1" to restrict to localhost
     "cacheTtlSeconds": 60,
     "topCounts": { "domains": 10, "clients": 10, "upstreams": 10 },
     "servers": [

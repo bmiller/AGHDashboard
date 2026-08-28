@@ -68,6 +68,7 @@ function normalizeServers(user, defaults) {
 function loadConfig() {
     const defaults = {
         listenPort: 8199,
+        listenHost: "0.0.0.0",
         adguard: {
             baseUrl: "http://192.168.5.30:8080",
             username: "",
@@ -79,8 +80,8 @@ function loadConfig() {
         activity: {
             hours: 24,
             intervalMinutes: 10,
-            pageSize: 10000,
-            maxPages: 80,
+            pageSize: 50000, // AdGuard Home caps query-log pages at 50k entries
+            maxPages: 10, // safety cap on pagination (50000 * 10 entries)
             maxClients: 24,
         },
     };
@@ -100,6 +101,7 @@ function loadConfig() {
 
     const cfg = {
         listenPort: user.listenPort ?? defaults.listenPort,
+        listenHost: user.listenHost ?? defaults.listenHost,
         cacheTtlSeconds: user.cacheTtlSeconds ?? defaults.cacheTtlSeconds,
         topCounts: { ...defaults.topCounts, ...(user.topCounts || {}) },
         activity: { ...defaults.activity, ...(user.activity || {}) },
@@ -137,13 +139,17 @@ function parseTimestampMs(ts) {
 }
 
 async function aghFetch(server, apiPath) {
-    const auth = Buffer.from(`${server.username}:${server.password}`).toString("base64");
+    const headers = { Accept: "application/json" };
+    if (server.username || server.password) {
+        const auth = Buffer.from(`${server.username}:${server.password}`).toString("base64");
+        headers.Authorization = `Basic ${auth}`;
+    }
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), server.timeoutMs);
     try {
         const res = await fetch(server.baseUrl + apiPath, {
-            headers: { Authorization: `Basic ${auth}`, Accept: "application/json" },
+            headers,
             signal: controller.signal,
         });
         return res;
@@ -356,7 +362,12 @@ async function fetchServerStats(server) {
 /** Map client IP -> display name from AGH's /control/clients (persistent + auto-discovered). */
 function buildClientNameMap(payload) {
     const map = {};
-    const isIp = (s) => /^[0-9.]+$/.test(s) || /:/.test(s);
+    // Only map plain IPv4/IPv6 client ids; CIDR ranges, MAC addresses and
+    // ClientIDs are skipped since the query log keys clients by bare IP.
+    const isMac = (s) => /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/i.test(s);
+    const isIp = (s) =>
+        /^\d{1,3}(\.\d{1,3}){3}$/.test(s) ||
+        (/^[0-9a-f:]+$/i.test(s) && s.includes(":") && !isMac(s));
     const add = (id, name) => {
         const ip = String(id || "").trim();
         const nm = String(name || "").trim();
@@ -729,9 +740,12 @@ const MIME = {
     ".js": "text/javascript; charset=utf-8",
     ".css": "text/css; charset=utf-8",
     ".json": "application/json; charset=utf-8",
+    ".map": "application/json; charset=utf-8",
+    ".txt": "text/plain; charset=utf-8",
     ".svg": "image/svg+xml",
     ".png": "image/png",
     ".ico": "image/x-icon",
+    ".woff": "font/woff",
     ".woff2": "font/woff2",
 };
 
@@ -746,10 +760,16 @@ function sendJson(res, status, obj) {
 }
 
 function serveStatic(req, res, pathname) {
-    let rel = decodeURIComponent(pathname);
+    let rel;
+    try {
+        rel = decodeURIComponent(pathname);
+    } catch (_) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        return res.end("Bad request");
+    }
     if (rel === "/") rel = "/index.html";
     const filePath = path.normalize(path.join(PUBLIC_DIR, rel));
-    if (!filePath.startsWith(PUBLIC_DIR)) {
+    if (filePath !== PUBLIC_DIR && !filePath.startsWith(PUBLIC_DIR + path.sep)) {
         res.writeHead(403);
         return res.end("Forbidden");
     }
@@ -765,7 +785,7 @@ function serveStatic(req, res, pathname) {
                 ? "public, max-age=86400"
                 : "no-cache",
         });
-        res.end(buf);
+        res.end(req.method === "HEAD" ? undefined : buf);
     });
 }
 
@@ -802,8 +822,10 @@ const server = http.createServer(async (req, res) => {
     }
 });
 
-server.listen(CONFIG.listenPort, () => {
-    console.log(`AdGuard Home dashboard listening on http://localhost:${CONFIG.listenPort}`);
+server.listen(CONFIG.listenPort, CONFIG.listenHost, () => {
+    console.log(
+        `AdGuard Home dashboard listening on http://${CONFIG.listenHost}:${CONFIG.listenPort}`
+    );
     for (const s of CONFIG.servers) {
         console.log(`Upstream AdGuard Home "${s.name}": ${s.baseUrl} (user: ${s.username || "<none>"})`);
     }

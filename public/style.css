@@ -402,8 +402,6 @@ html[data-theme='dark'] .icon-moon { display: none; }
     font-size: 12px;
 }
 
-.page-foot span { font-variant-numeric: tabular-nums; }
-
 /* ---------- Chart.js custom tooltip (Pi-hole style) ---------- */
 
 .chartjs-tooltip {

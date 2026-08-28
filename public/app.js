@@ -9,11 +9,25 @@
 
 /* ---------------- Constants (Pi-hole theme) ---------------- */
 
+// One distinct color per client dataset. The first entries keep the Pi-hole
+// palette; the rest fill it out so every possible dataset (up to
+// activity.maxClients + the "Other clients" row) has its own fixed color.
+// Anything beyond the list falls back to a deterministic hue (never random),
+// so colors stay stable across refreshes.
 const THEME_COLORS = [
     "#f56954", "#3c8dbc", "#00a65a", "#00c0ef", "#f39c12", "#0073b7",
     "#001f3f", "#39cccc", "#3d9970", "#01ff70", "#ff851b", "#f012be",
-    "#8e24aa", "#d81b60", "#222222", "#d2d6de",
+    "#8e24aa", "#d81b60", "#7cb342", "#c0703b", "#5c6bc0", "#26a69a",
+    "#ec407a", "#ab47bc", "#ffa726", "#66bb6a", "#29b6f6", "#8d6e63",
+    "#bdbd3a", "#546e7a", "#d4a017", "#5d4037", "#00897b", "#c2185b",
 ];
+
+// Deterministic fallback color for dataset index `i` (golden-angle hue rotation).
+function clientColor(i) {
+    if (i < THEME_COLORS.length) return THEME_COLORS[i];
+    const hue = ((i - THEME_COLORS.length) * 137.508) % 360;
+    return `hsl(${hue.toFixed(1)}, 60%, 55%)`;
+}
 
 const SEGMENTS = [
     { key: "permitted", label: "Permitted" },
@@ -66,7 +80,6 @@ function timeAgo(iso) {
 }
 
 let lastStatsAt = null;
-let lastActivityAt = null;
 let liveSuffix = "";
 
 function updateServerStatus(stats) {
@@ -283,10 +296,7 @@ function updateCharts(data, firstLoad) {
     clientsChart.data.datasets = data.clients.names.map((name, i) => ({
         label: name,
         data: data.clients.rows[i],
-        backgroundColor:
-            i < THEME_COLORS.length
-                ? THEME_COLORS[i]
-                : "#" + Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, "0"),
+        backgroundColor: clientColor(i),
     }));
 
     totalQueriesChart.update();
@@ -294,7 +304,6 @@ function updateCharts(data, firstLoad) {
 
     $("overlay-totalQueries").classList.add("hidden");
     $("overlay-clients").classList.add("hidden");
-    lastActivityAt = data.generatedAt;
 }
 
 /* ---------------- Stats rendering ---------------- */
