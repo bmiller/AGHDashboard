@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Requests &ndash; AdGuard Home Dashboard</title>
+    <link rel="stylesheet" href="style.css" />
+    <script>
+        (function () {
+            var t = null;
+            try { t = localStorage.getItem("agh-dash-theme"); } catch (e) { /* ignore */ }
+            if (t !== "light" && t !== "dark") {
+                t = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+                    ? "dark"
+                    : "light";
+            }
+            document.documentElement.dataset.theme = t;
+        })();
+    </script>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2300a65a' d='M12 2 4 5v6c0 5 3.4 9.7 8 11 4.6-1.3 8-6 8-11V5l-8-3z'/%3E%3C/svg%3E" />
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path style="fill:var(--seg-permitted)" d="M12 2 4 5v6c0 5 3.4 9.7 8 11 4.6-1.3 8-6 8-11V5l-8-3z"/></svg>
+            <span class="brand-name">AdGuard Home</span>
+            <span class="brand-sub">Requests</span>
+        </div>
+        <div class="topbar-controls">
+            <a class="theme-toggle" href="index.html" title="Back to dashboard" aria-label="Back to dashboard" style="text-decoration:none;display:flex;align-items:center;justify-content:center;">
+                <svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16"><path fill="currentColor" d="M20 11H7.8l5.6-5.6L12 4l-8 8 8 8 1.4-1.4L7.8 13H20z"/></svg>
+            </a>
+        </div>
+    </header>
+
+    <main class="container">
+        <div id="error-banner" class="error-banner hidden"></div>
+
+        <section class="card requests-head">
+            <div class="card-head">
+                <h2 id="requests-title">Requests</h2>
+                <div class="card-sub" id="requests-sub">&nbsp;</div>
+            </div>
+            <div class="requests-filters" id="requests-filters"></div>
+        </section>
+
+        <section class="card requests-table-card">
+            <div class="chart-wrap requests-table-wrap">
+                <table class="requests-table" id="requests-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Domain</th>
+                            <th>Type</th>
+                            <th>Client</th>
+                            <th>Status</th>
+                            <th>Upstream</th>
+                            <th>Time (ms)</th>
+                            <th>Rule</th>
+                        </tr>
+                    </thead>
+                    <tbody id="requests-tbody"></tbody>
+                </table>
+                <div class="chart-overlay" id="requests-overlay">Loading requests&hellip;</div>
+            </div>
+        </section>
+    </main>
+
+    <script src="requests.js"></script>
+</body>
+</html>
