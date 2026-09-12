@@ -28,6 +28,7 @@ const { loadConfig, ROOT } = require("./lib/config");
 const { ApiError } = require("./lib/util");
 const { createStatsService } = require("./lib/stats");
 const { createActivityService } = require("./lib/activity");
+const { getRequestsInRange } = require("./lib/requests");
 
 const PUBLIC_DIR = path.join(ROOT, "public");
 
@@ -117,6 +118,15 @@ const server = http.createServer(async (req, res) => {
             sendJson(res, 200, await getStats());
         } else if (url.pathname === "/api/activity") {
             sendJson(res, 200, await getActivity());
+        } else if (url.pathname === "/api/requests") {
+            const start = Number(url.searchParams.get("start"));
+            const end = Number(url.searchParams.get("end"));
+            const client = url.searchParams.get("client");
+            if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+                sendJson(res, 400, { error: "start and end query params (ms since epoch) are required, with end > start" });
+            } else {
+                sendJson(res, 200, await getRequestsInRange(CONFIG, start, end, client));
+            }
         } else if (url.pathname === "/api/health") {
             sendJson(res, 200, {
                 ok: true,

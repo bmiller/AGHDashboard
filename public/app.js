@@ -242,12 +242,43 @@ function rangeTitle(kind) {
     };
 }
 
-function baseOptions(chartId, kind) {
+// Opens a new tab listing the individual requests for one activity bucket
+// (optionally scoped to a single client), so the underlying totals stay
+// unfussy while still letting you drill into what actually happened.
+function openRequestsPage(startMs, endMs, client) {
+    const params = new URLSearchParams({ start: String(startMs), end: String(endMs) });
+    if (client) params.set("client", client);
+    window.open(`requests.html?${params.toString()}`, "_blank", "noopener");
+}
+
+function bucketClickHandler(isClientsChart) {
+    return function onClick(evt, _elements, chart) {
+        if (!activityData) return;
+        const points = chart.getElementsAtEventForMode(evt, "index", { intersect: false }, true);
+        if (points.length === 0) return;
+        const idx = points[0].index;
+        const start = activityData.bucketStartsMs[idx];
+        const end = start + activityData.bucketMinutes * 60000;
+
+        let client = null;
+        if (isClientsChart) {
+            const hit = chart.getElementsAtEventForMode(evt, "nearest", { intersect: true }, true);
+            if (hit.length > 0) client = chart.data.datasets[hit[0].datasetIndex].label;
+        }
+        openRequestsPage(start, end, client);
+    };
+}
+
+function baseOptions(chartId, kind, isClientsChart) {
     return {
         responsive: true,
         maintainAspectRatio: false,
         animation: { duration: 400 },
         interaction: { mode: "nearest", axis: "x", intersect: false },
+        onClick: bucketClickHandler(isClientsChart),
+        onHover: (evt, elements) => {
+            evt.native.target.style.cursor = elements.length > 0 ? "pointer" : "default";
+        },
         plugins: {
             legend: { display: false },
             tooltip: {
@@ -268,13 +299,13 @@ function baseOptions(chartId, kind) {
 const totalQueriesChart = new Chart($("totalQueriesChart").getContext("2d"), {
     type: "bar",
     data: { labels: [], datasets: SEGMENTS.map(() => ({ data: [] })) },
-    options: baseOptions("totalQueries", "Queries"),
+    options: baseOptions("totalQueries", "Queries", false),
 });
 
 const clientsChart = new Chart($("clientsChart").getContext("2d"), {
     type: "bar",
     data: { labels: [], datasets: [] },
-    options: baseOptions("clientsChart", "Client activity"),
+    options: baseOptions("clientsChart", "Client activity", true),
 });
 
 function updateCharts(data, firstLoad) {
