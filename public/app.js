@@ -362,13 +362,15 @@ function renderStats(stats) {
     if (rtNames.length === 0) {
         rtEl.innerHTML = "&nbsp;";
     } else {
+        // Strip a leading "https://" so long upstream URLs don't blow out the name column.
+        const displayName = (name) => name.replace(/^https:\/\//, "");
         // Fixed-width name column (in ch units, monospace font) so times line up.
-        const nameCh = Math.max(...rtNames.map((n) => n.length)) + 2;
+        const nameCh = Math.max(...rtNames.map((n) => displayName(n).length)) + 2;
         rtEl.innerHTML = rtNames
             .map(
                 (name) =>
                     `<div class="rt-line" style="--rt-name-ch:${nameCh}ch">` +
-                    `<span class="rt-name">${escapeHtml(name)}:</span>` +
+                    `<span class="rt-name">${escapeHtml(displayName(name))}:</span>` +
                     `<span>${avgTimes[name]} ms</span></div>`
             )
             .join("");
