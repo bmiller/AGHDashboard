@@ -7,7 +7,7 @@
 
 "use strict";
 
-const $ = (id) => document.getElementById(id);
+// $, escapeHtml, pad2 and fetchJson come from common.js.
 
 const STATUS_LABEL = {
     permitted: "Permitted",
@@ -15,16 +15,6 @@ const STATUS_LABEL = {
     cached: "Cached",
     other: "Other",
 };
-
-function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (c) => ({
-        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-    }[c]));
-}
-
-function pad2(n) {
-    return String(n).padStart(2, "0");
-}
 
 function fmtTime(ms) {
     const d = new Date(ms);
@@ -44,6 +34,10 @@ function showError(msg) {
     el.textContent = msg;
     el.classList.remove("hidden");
 }
+
+// Caveats about the loaded window (truncation, missing servers), kept so they
+// survive re-rendering the subtitle when the client filter changes.
+let windowNotes = [];
 
 function readParams() {
     const p = new URLSearchParams(location.search);
@@ -87,7 +81,8 @@ function applyClientFilter(allRows, client) {
     const params = readParams();
     $("requests-title").textContent = client ? `Requests — ${client}` : "Requests";
     $("requests-sub").innerHTML =
-        `${fmtRange(params.start, params.end)} &middot; ${filtered.length} request${filtered.length === 1 ? "" : "s"}`;
+        `${fmtRange(params.start, params.end)} &middot; ${filtered.length} request${filtered.length === 1 ? "" : "s"}` +
+        windowNotes.map((n) => ` &middot; ${escapeHtml(n)}`).join("");
 
     const url = new URL(location.href);
     if (client) url.searchParams.set("client", client);
@@ -109,9 +104,9 @@ function renderTable(rows) {
                 `<td class="col-domain" title="${escapeHtml(r.domain)}">${escapeHtml(r.domain)}</td>` +
                 `<td class="col-type">${escapeHtml(r.queryType || "–")}</td>` +
                 `<td class="col-client">${escapeHtml(r.client)}</td>` +
-                `<td class="col-status"><span class="status-pill status-${r.status}">${STATUS_LABEL[r.status] || r.status}</span></td>` +
+                `<td class="col-status"><span class="status-pill status-${escapeHtml(r.status)}">${escapeHtml(STATUS_LABEL[r.status] || r.status)}</span></td>` +
                 `<td class="col-upstream" title="${escapeHtml(r.upstream)}">${escapeHtml(r.upstream || "–")}</td>` +
-                `<td class="col-elapsed">${r.elapsedMs == null ? "–" : r.elapsedMs}</td>` +
+                `<td class="col-elapsed">${r.elapsedMs == null ? "–" : escapeHtml(r.elapsedMs)}</td>` +
                 `<td class="col-rule" title="${escapeHtml(r.rule)}">${r.rule ? escapeHtml(r.rule) : "–"}</td>` +
                 `</tr>`
         )
@@ -134,26 +129,27 @@ async function load() {
         // Fetch the whole window unfiltered so the client dropdown can switch
         // between clients instantly, without a round trip per selection.
         const qs = new URLSearchParams({ start: String(params.start), end: String(params.end) });
-        const res = await fetch(`/api/requests?${qs.toString()}`, { cache: "no-store" });
-        if (!res.ok) {
-            let msg = `HTTP ${res.status}`;
-            try {
-                const body = await res.json();
-                if (body && body.error) msg = body.error;
-            } catch (_) { /* ignore */ }
-            throw new Error(msg);
-        }
-        const data = await res.json();
+        const data = await fetchJson(`/api/requests?${qs.toString()}`);
         const allRows = data.requests || [];
         const effectiveClient = params.client && allRows.some((r) => r.client === params.client) ? params.client : "";
 
+        const notes = [];
+        if (data.truncated) {
+            notes.push(`showing the first ${data.count.toLocaleString()} of ${data.totalCount.toLocaleString()} requests`);
+        }
+        const servers = (data.meta && data.meta.servers) || [];
+        const down = servers.filter((s) => !s.ok).map((s) => s.name);
+        if (down.length > 0) {
+            notes.push(`unavailable: ${down.join(", ")}`);
+        } else if (data.meta && !data.meta.complete) {
+            // Every server answered, but paging hit activity.maxPages before
+            // reaching the start of this window.
+            notes.push("older part of this window may be missing (query-log paging limit reached)");
+        }
+        windowNotes = notes;
+
         renderClientFilter(allRows, effectiveClient);
         applyClientFilter(allRows, effectiveClient);
-
-        if (data.meta && !data.meta.complete) {
-            const sub = $("requests-sub");
-            sub.innerHTML += " &middot; some servers unavailable";
-        }
     } catch (err) {
         showError(`Failed to load requests: ${err.message}`);
     } finally {
