@@ -13,22 +13,23 @@
  * - Caches aggregated results to avoid hammering AdGuard Home
  *
  * Implementation is split across ./lib:
+ *   app.js      - HTTP handler: security headers, auth, routing, static files
  *   config.js   - config.json loading, defaults + validation
  *   auth.js     - optional Basic auth for the dashboard itself
  *   util.js     - ApiError, timestamp parsing, sleep
  *   agh.js      - AdGuard Home HTTP client
+ *   querylog.js - shared query-log pagination
  *   stats.js    - /control/stats normalization + cached getStats()
  *   activity.js - query-log bucketing + cached getActivity()
  *   requests.js - per-window request listing (validated, concurrency-limited)
  */
 
 const http = require("http");
-const fs = require("fs");
 const path = require("path");
 
 const { loadConfig, ConfigError, ROOT } = require("./lib/config");
-const { checkBasicAuth, isLoopbackHost } = require("./lib/auth");
-const { ApiError } = require("./lib/util");
+const { isLoopbackHost } = require("./lib/auth");
+const { createHandler } = require("./lib/app");
 const { createStatsService } = require("./lib/stats");
 const { createActivityService } = require("./lib/activity");
 const { createRequestsService } = require("./lib/requests");
@@ -53,116 +54,7 @@ process.on("unhandledRejection", (reason) => {
     console.error("[error] unhandled rejection:", reason instanceof Error ? reason.stack : reason);
 });
 
-/* ------------------------------------------------------------------ */
-/* Static files & routing                                             */
-/* ------------------------------------------------------------------ */
-
-const MIME = {
-    ".html": "text/html; charset=utf-8",
-    ".js": "text/javascript; charset=utf-8",
-    ".css": "text/css; charset=utf-8",
-    ".json": "application/json; charset=utf-8",
-    ".map": "application/json; charset=utf-8",
-    ".txt": "text/plain; charset=utf-8",
-    ".svg": "image/svg+xml",
-    ".png": "image/png",
-    ".ico": "image/x-icon",
-    ".woff": "font/woff",
-    ".woff2": "font/woff2",
-};
-
-function sendJson(res, status, obj) {
-    const body = JSON.stringify(obj);
-    res.writeHead(status, {
-        "Content-Type": "application/json; charset=utf-8",
-        "Content-Length": Buffer.byteLength(body),
-        "Cache-Control": "no-store",
-    });
-    res.end(body);
-}
-
-function serveStatic(req, res, pathname) {
-    let rel;
-    try {
-        rel = decodeURIComponent(pathname);
-    } catch (_) {
-        res.writeHead(400, { "Content-Type": "text/plain" });
-        return res.end("Bad request");
-    }
-    if (rel === "/") rel = "/index.html";
-    const filePath = path.normalize(path.join(PUBLIC_DIR, rel));
-    if (filePath !== PUBLIC_DIR && !filePath.startsWith(PUBLIC_DIR + path.sep)) {
-        res.writeHead(403);
-        return res.end("Forbidden");
-    }
-    fs.readFile(filePath, (err, buf) => {
-        if (err) {
-            res.writeHead(404, { "Content-Type": "text/plain" });
-            return res.end("Not found");
-        }
-        res.writeHead(200, {
-            "Content-Type": MIME[path.extname(filePath)] || "application/octet-stream",
-            "Content-Length": buf.length,
-            "Cache-Control": filePath.includes(`${path.sep}vendor${path.sep}`)
-                ? "public, max-age=86400"
-                : "no-cache",
-        });
-        res.end(req.method === "HEAD" ? undefined : buf);
-    });
-}
-
-const server = http.createServer(async (req, res) => {
-    const started = Date.now();
-
-    // Log once the response is actually flushed, so the status code is accurate
-    // even for the async static-file path.
-    res.on("finish", () => {
-        if (!String(req.url).startsWith("/api/health")) {
-            console.log(
-                `${new Date().toISOString()} ${req.method} ${req.url} ${res.statusCode} ${Date.now() - started}ms`
-            );
-        }
-    });
-
-    try {
-        // Fixed base: the Host header is client-controlled and never needed here
-        // (a malformed one used to make this throw and crash the process).
-        const url = new URL(req.url, "http://localhost");
-
-        // Health stays open for monitoring; it reveals nothing about the upstreams.
-        if (url.pathname === "/api/health") {
-            return sendJson(res, 200, { ok: true, uptimeSec: Math.round(process.uptime()) });
-        }
-
-        if (!checkBasicAuth(req.headers.authorization, CONFIG.auth)) {
-            res.writeHead(401, {
-                "WWW-Authenticate": 'Basic realm="AdGuard Home Dashboard", charset="UTF-8"',
-                "Content-Type": "text/plain; charset=utf-8",
-                "Cache-Control": "no-store",
-            });
-            return res.end("Authentication required");
-        }
-
-        if (url.pathname === "/api/stats") {
-            sendJson(res, 200, await getStats());
-        } else if (url.pathname === "/api/activity") {
-            sendJson(res, 200, await getActivity());
-        } else if (url.pathname === "/api/requests") {
-            const start = Number(url.searchParams.get("start"));
-            const end = Number(url.searchParams.get("end"));
-            const client = url.searchParams.get("client");
-            sendJson(res, 200, await getRequests(start, end, client));
-        } else if (url.pathname.startsWith("/api/")) {
-            sendJson(res, 404, { error: "Unknown API endpoint" });
-        } else {
-            serveStatic(req, res, url.pathname);
-        }
-    } catch (err) {
-        const status = err instanceof ApiError ? err.status : 500;
-        if (status >= 500) console.error(`[error] ${req.method} ${req.url} ->`, err.message);
-        if (!res.headersSent) sendJson(res, status, { error: err.message || "Internal error" });
-    }
-});
+const server = http.createServer(createHandler(CONFIG, { getStats, getActivity, getRequests }, PUBLIC_DIR));
 
 server.on("error", (err) => {
     console.error("[server] fatal:", err.message);

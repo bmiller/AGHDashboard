@@ -35,11 +35,13 @@ page load.
   - serves `/api/requests` (the individual queries behind a clicked chart bar), limited in window
     size, row count and concurrency
 
-  The implementation is split across `lib/`: `config.js` (config loading, defaults +
-  validation), `auth.js` (optional Basic auth), `util.js` (errors, timestamp parsing), `agh.js`
-  (AdGuard Home HTTP client), `stats.js` (`/control/stats` normalization + cached `getStats()`),
-  `activity.js` (query-log bucketing + cached `getActivity()`) and `requests.js` (per-window
-  request listing). Pure helpers are covered by `npm test` (`node --test`).
+  The implementation is split across `lib/`: `app.js` (HTTP handler: security headers, auth,
+  routing, static files), `config.js` (config loading, defaults + validation), `auth.js`
+  (optional Basic auth), `util.js` (errors, timestamp parsing), `agh.js` (AdGuard Home HTTP
+  client), `querylog.js` (shared query-log pagination), `stats.js` (`/control/stats`
+  normalization + cached `getStats()`), `activity.js` (query-log bucketing + cached
+  `getActivity()`) and `requests.js` (per-window request listing). `npm test` (`node --test`)
+  covers the helpers, pagination, caching, request limits and the HTTP handler.
 - `public/` - single-page frontend using a locally vendored Chart.js 4.5.1 (the same version
   Pi-hole uses). Chart layout, tooltips and colors are modeled on the Pi-hole web UI
   (`pi-hole/web` `scripts/js/index.js` and `scripts/js/charts.js`).
@@ -93,6 +95,22 @@ binds to `127.0.0.1` by default. If you bind it to a network address, set `auth`
 asks for a username and password; the server logs a warning at startup if you don't.
 `/api/health` stays unauthenticated for monitoring and returns only `ok` and uptime.
 
+Every response carries a strict Content-Security-Policy (same-origin scripts only, no framing),
+`X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`. Only `GET` and `HEAD`
+are accepted. Error messages shown in the browser name the failing server but not its address;
+the details are in the server log.
+
+`config.json` holds your AdGuard Home credentials in plain text, so keep it readable only by the
+user running the dashboard (`chmod 600 config.json`).
+
+HTTP vs HTTPS: nothing here requires HTTPS. Both the browser-to-dashboard connection and the
+dashboard-to-AdGuard Home connection (`baseUrl`) can be plain `http://`, which is fine on a
+trusted home network. Just be aware that over HTTP the Basic auth credentials (the dashboard's
+`auth` and each server's `username`/`password`) travel unencrypted, so anyone able to watch that
+traffic could read them. If the dashboard or AdGuard Home is ever reachable from an untrusted
+network, use an `https://` `baseUrl` and put the dashboard behind a TLS-terminating reverse
+proxy.
+
 ### Multiple AdGuard Home servers
 
 Add more entries to the `servers` array and everything is aggregated into one combined view:
@@ -125,8 +143,9 @@ Then open http://localhost:8199/
 
 - The first aggregation after startup takes a few seconds (it pages through ~90k query-log
   entries on a busy network); afterwards it is cached and refreshed in the background.
-- Stats refresh every 10 s, charts every 60 s.
-- AdGuard Home's own 24 h statistics are used for the stat cards and top tables, so those numbers
-  match the built-in dashboard exactly. The bar charts are computed independently from the query
-  log, so they may differ from AdGuard's hourly stats by well under 1% due to differing window
-  boundaries.
+- Stats refresh every 10 s, charts every 60 s; refreshing pauses while the tab is hidden.
+- AdGuard Home's own statistics (for whatever period it is configured to keep: 24 h, 7 days,
+  ...) are used for the stat cards and top tables, so those numbers match the built-in dashboard
+  exactly. The bar charts are computed independently from the query log over `activity.hours`,
+  so with a 24 h stats period they may differ from AdGuard's hourly stats by well under 1% due
+  to differing window boundaries.

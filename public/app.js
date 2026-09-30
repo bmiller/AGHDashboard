@@ -46,7 +46,7 @@ const ACTIVITY_REFRESH_MS = 60000;
 
 /* ---------------- Small utilities ---------------- */
 
-const $ = (id) => document.getElementById(id);
+// $, escapeHtml, pad2 and fetchJson come from common.js.
 
 function cssVar(name) {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -56,19 +56,9 @@ function fmtInt(n) {
     return Number(n).toLocaleString("en-US");
 }
 
-function pad2(n) {
-    return String(n).padStart(2, "0");
-}
-
 function hhmm(ms) {
     const d = new Date(ms);
     return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-}
-
-function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (c) => ({
-        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-    }[c]));
 }
 
 function timeAgo(iso) {
@@ -118,19 +108,6 @@ function setLoadError(source, msg) {
         el.classList.add("hidden");
         if (lastStatsAt) setStatus("ok", `Live${liveSuffix} · updated ${timeAgo(lastStatsAt)}`);
     }
-}
-
-async function fetchJson(url) {
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) {
-        let msg = `HTTP ${res.status}`;
-        try {
-            const body = await res.json();
-            if (body && body.error) msg = body.error;
-        } catch (_) { /* ignore */ }
-        throw new Error(msg);
-    }
-    return res.json();
 }
 
 /* ---------------- Custom tooltip (Pi-hole style) ---------------- */
@@ -232,11 +209,24 @@ function commonScales() {
     };
 }
 
-// Show a tick label only on full hours (like Pi-hole's hourly unit).
-function buildLabels(bucketStartsMs) {
-    return bucketStartsMs.map((ms) => {
-        const d = new Date(ms);
-        return d.getMinutes() === 0 ? hhmm(ms) : "";
+// Label the bucket containing each local full hour (like Pi-hole's hourly
+// unit). Buckets are aligned to UTC, so in zones with a :30/:45 offset, or with
+// an interval that doesn't divide an hour, no bucket starts exactly on :00;
+// checking for a contained hour boundary keeps the labels in those cases.
+// Windows longer than a day label every Nth hour so labels don't overlap.
+function buildLabels(bucketStartsMs, bucketMinutes) {
+    const bucketMs = bucketMinutes * 60000;
+    const spanHours = (bucketStartsMs.length * bucketMs) / 3600000;
+    // Smallest step that divides a day evenly and keeps it to ~24 labels.
+    const everyHours = [1, 2, 3, 4, 6, 8, 12, 24].find((h) => h >= spanHours / 24) || 24;
+    return bucketStartsMs.map((start) => {
+        // First local full hour at or after `start`.
+        const d = new Date(start);
+        if (d.getMinutes() !== 0 || d.getSeconds() !== 0 || d.getMilliseconds() !== 0) {
+            d.setMinutes(60, 0, 0);
+        }
+        if (d.getTime() >= start + bucketMs) return "";
+        return d.getHours() % everyHours === 0 ? hhmm(d.getTime()) : "";
     });
 }
 
@@ -322,7 +312,7 @@ const clientsChart = new Chart($("clientsChart").getContext("2d"), {
 
 function updateCharts(data, firstLoad) {
     activityData = data;
-    const labels = buildLabels(data.bucketStartsMs);
+    const labels = buildLabels(data.bucketStartsMs, data.bucketMinutes);
     const anim = firstLoad ? 400 : 0;
 
     totalQueriesChart.options.animation.duration = anim;
@@ -350,6 +340,13 @@ function updateCharts(data, firstLoad) {
 }
 
 /* ---------------- Stats rendering ---------------- */
+
+/** "24h", "7 days", ... for AGH's statistics period, or null if unknown. */
+function fmtWindow(hours) {
+    if (!hours) return null;
+    if (hours % 24 === 0 && hours > 24) return `${hours / 24} days`;
+    return `${hours}h`;
+}
 
 function pctOfTotal(total, n) {
     return total > 0 ? `${((100 * n) / total).toFixed(1)}% of all queries` : "n/a";
@@ -381,8 +378,12 @@ function renderStats(stats) {
     updateServerStatus(stats);
     const t = stats.totals;
     $("stat-queries").textContent = fmtInt(t.queries);
+    // AGH's stats period is configurable (24h, 7 days, ...), so use what it reports.
+    const windowLabel = fmtWindow(stats.windowHours);
     $("stat-queries-sub").textContent =
-        t.queries > 0 ? `~${Math.max(1, Math.round(t.queries / (24 * 60)))}/min over 24h` : "";
+        t.queries > 0 && windowLabel
+            ? `~${Math.max(1, Math.round(t.queries / (stats.windowHours * 60)))}/min over ${windowLabel}`
+            : "";
     $("stat-blocked").textContent = fmtInt(t.blocked);
     $("stat-blocked-sub").textContent = pctOfTotal(t.queries, t.blocked);
     $("stat-malware").textContent = fmtInt(t.safebrowsing);
@@ -482,10 +483,43 @@ colorSchemeMedia.addEventListener("change", (e) => {
 
 /* ---------------- Boot & refresh timers ---------------- */
 
-loadStats();
-loadActivity(true);
-setInterval(loadStats, STATS_REFRESH_MS);
-setInterval(loadActivity, ACTIVITY_REFRESH_MS);
+// Each loader reschedules itself only after its request settles, so slow
+// responses never pile up or land out of order. Polling pauses while the tab
+// is hidden and catches up as soon as it is visible again.
+function poll(load, intervalMs) {
+    let timer = null;
+    let running = false;
+
+    async function tick() {
+        timer = null;
+        if (running || document.hidden) return;
+        running = true;
+        try {
+            await load();
+        } finally {
+            running = false;
+            if (!document.hidden) timer = setTimeout(tick, intervalMs);
+        }
+    }
+
+    document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+            clearTimeout(timer);
+            timer = null;
+        } else if (!timer) {
+            tick();
+        }
+    });
+
+    return tick;
+}
+
+let activityLoaded = false;
+poll(loadStats, STATS_REFRESH_MS)();
+poll(async () => {
+    await loadActivity(!activityLoaded);
+    activityLoaded = true;
+}, ACTIVITY_REFRESH_MS)();
 
 setInterval(() => {
     if ($("status-pill").classList.contains("ok")) {

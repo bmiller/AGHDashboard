@@ -6,6 +6,7 @@ const assert = require("node:assert/strict");
 const {
     normalizeTopList,
     firstArray,
+    statsWindowHours,
     normalizeStats,
     sumArrays,
     mergeTopLists,
@@ -115,4 +116,26 @@ test("aggregateStats: sums totals and resolves client names across servers", () 
         agg.servers.map((s) => [s.name, s.ok]),
         [["s1", true], ["s2", true], ["s3", false]]
     );
+});
+
+test("statsWindowHours: hours, days, legacy and unknown", () => {
+    const arr = (n) => new Array(n).fill(0);
+    assert.equal(statsWindowHours({ time_units: "hours", dns_queries: arr(24) }), 24);
+    assert.equal(statsWindowHours({ time_units: "days", dns_queries: arr(7) }), 168);
+    assert.equal(statsWindowHours({ num_queries_per_hour: arr(24) }), 24);
+    assert.equal(statsWindowHours({ time_units: "weeks", dns_queries: arr(4) }), null);
+    assert.equal(statsWindowHours({}), null);
+});
+
+test("aggregateStats: windowHours is the longest reported period", () => {
+    const raw = (units, n) => ({ time_units: units, dns_queries: new Array(n).fill(1) });
+    const out = aggregateStats(
+        [
+            { name: "a", ok: true, raw: raw("hours", 24), error: null },
+            { name: "b", ok: true, raw: raw("days", 7), error: null },
+        ],
+        { domains: 10, clients: 10, upstreams: 10 }
+    );
+    assert.equal(out.windowHours, 168);
+    assert.equal(aggregateStats([{ name: "a", ok: true, raw: {}, error: null }], { domains: 1, clients: 1, upstreams: 1 }).windowHours, null);
 });
