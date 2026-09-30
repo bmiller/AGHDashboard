@@ -1,18 +1,19 @@
 {
     "listenPort": 8199,
-    "listenHost": "0.0.0.0",
+    "listenHost": "127.0.0.1",
+    "auth": { "username": "admin", "password": "change-me" },
     "cacheTtlSeconds": 60,
     "topCounts": { "domains": 10, "clients": 10, "upstreams": 10 },
     "servers": [
         {
             "name": "adguard-1",
-            "baseUrl": "http://192.168.5.30:8080",
+            "baseUrl": "http://192.168.1.2:8080",
             "username": "",
             "password": ""
         },
         {
             "name": "adguard-2",
-            "baseUrl": "http://192.168.5.31:8080",
+            "baseUrl": "http://192.168.1.3:8080",
             "username": "",
             "password": ""
         }
@@ -23,5 +24,10 @@
         "pageSize": 50000,
         "maxPages": 10,
         "maxClients": 24
+    },
+    "requests": {
+        "maxRangeMinutes": 60,
+        "maxRows": 5000,
+        "maxConcurrent": 2
     }
 }

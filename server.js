@@ -13,33 +13,45 @@
  * - Caches aggregated results to avoid hammering AdGuard Home
  *
  * Implementation is split across ./lib:
- *   config.js   - config.json loading + defaults
+ *   config.js   - config.json loading, defaults + validation
+ *   auth.js     - optional Basic auth for the dashboard itself
  *   util.js     - ApiError, timestamp parsing, sleep
  *   agh.js      - AdGuard Home HTTP client
  *   stats.js    - /control/stats normalization + cached getStats()
  *   activity.js - query-log bucketing + cached getActivity()
+ *   requests.js - per-window request listing (validated, concurrency-limited)
  */
 
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
 
-const { loadConfig, ROOT } = require("./lib/config");
+const { loadConfig, ConfigError, ROOT } = require("./lib/config");
+const { checkBasicAuth, isLoopbackHost } = require("./lib/auth");
 const { ApiError } = require("./lib/util");
 const { createStatsService } = require("./lib/stats");
 const { createActivityService } = require("./lib/activity");
-const { getRequestsInRange } = require("./lib/requests");
+const { createRequestsService } = require("./lib/requests");
 
 const PUBLIC_DIR = path.join(ROOT, "public");
 
-const CONFIG = loadConfig();
-if (!Array.isArray(CONFIG.servers) || CONFIG.servers.length === 0) {
-    console.error("[config] no AdGuard Home servers configured (see config.example.json)");
+let CONFIG;
+try {
+    CONFIG = loadConfig();
+} catch (err) {
+    if (!(err instanceof ConfigError)) throw err;
+    console.error(`[config] ${err.message}`);
     process.exit(1);
 }
 
 const { getStats } = createStatsService(CONFIG);
-const { getActivity } = createActivityService(CONFIG);
+const { getActivity, refreshActivity } = createActivityService(CONFIG);
+const { getRequests } = createRequestsService(CONFIG);
+
+// Last-resort guard: a stray rejected promise must never take the server down.
+process.on("unhandledRejection", (reason) => {
+    console.error("[error] unhandled rejection:", reason instanceof Error ? reason.stack : reason);
+});
 
 /* ------------------------------------------------------------------ */
 /* Static files & routing                                             */
@@ -100,13 +112,12 @@ function serveStatic(req, res, pathname) {
 }
 
 const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
     const started = Date.now();
 
     // Log once the response is actually flushed, so the status code is accurate
     // even for the async static-file path.
     res.on("finish", () => {
-        if (!url.pathname.startsWith("/api/health")) {
+        if (!String(req.url).startsWith("/api/health")) {
             console.log(
                 `${new Date().toISOString()} ${req.method} ${req.url} ${res.statusCode} ${Date.now() - started}ms`
             );
@@ -114,6 +125,24 @@ const server = http.createServer(async (req, res) => {
     });
 
     try {
+        // Fixed base: the Host header is client-controlled and never needed here
+        // (a malformed one used to make this throw and crash the process).
+        const url = new URL(req.url, "http://localhost");
+
+        // Health stays open for monitoring; it reveals nothing about the upstreams.
+        if (url.pathname === "/api/health") {
+            return sendJson(res, 200, { ok: true, uptimeSec: Math.round(process.uptime()) });
+        }
+
+        if (!checkBasicAuth(req.headers.authorization, CONFIG.auth)) {
+            res.writeHead(401, {
+                "WWW-Authenticate": 'Basic realm="AdGuard Home Dashboard", charset="UTF-8"',
+                "Content-Type": "text/plain; charset=utf-8",
+                "Cache-Control": "no-store",
+            });
+            return res.end("Authentication required");
+        }
+
         if (url.pathname === "/api/stats") {
             sendJson(res, 200, await getStats());
         } else if (url.pathname === "/api/activity") {
@@ -122,17 +151,7 @@ const server = http.createServer(async (req, res) => {
             const start = Number(url.searchParams.get("start"));
             const end = Number(url.searchParams.get("end"));
             const client = url.searchParams.get("client");
-            if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
-                sendJson(res, 400, { error: "start and end query params (ms since epoch) are required, with end > start" });
-            } else {
-                sendJson(res, 200, await getRequestsInRange(CONFIG, start, end, client));
-            }
-        } else if (url.pathname === "/api/health") {
-            sendJson(res, 200, {
-                ok: true,
-                uptimeSec: Math.round(process.uptime()),
-                servers: CONFIG.servers.map((s) => ({ name: s.name, baseUrl: s.baseUrl })),
-            });
+            sendJson(res, 200, await getRequests(start, end, client));
         } else if (url.pathname.startsWith("/api/")) {
             sendJson(res, 404, { error: "Unknown API endpoint" });
         } else {
@@ -152,23 +171,30 @@ server.on("error", (err) => {
 
 server.listen(CONFIG.listenPort, CONFIG.listenHost, () => {
     console.log(`AdGuard Home dashboard listening on http://${CONFIG.listenHost}:${CONFIG.listenPort}`);
+    if (!CONFIG.auth && !isLoopbackHost(CONFIG.listenHost)) {
+        console.warn(
+            `[security] listening on ${CONFIG.listenHost} without 'auth' configured: anyone who can reach ` +
+                "this port can read your full DNS query log. Set 'auth' in config.json or bind to 127.0.0.1."
+        );
+    }
     for (const s of CONFIG.servers) {
         console.log(`Upstream AdGuard Home "${s.name}": ${s.baseUrl} (user: ${s.username || "<none>"})`);
     }
 
-    // Warm caches at startup and keep them fresh in the background so that
-    // browser requests are almost always served from cache.
+    // Warm caches at startup and refresh them as they expire, so browser
+    // requests are served from cache (getActivity also serves stale data
+    // while revalidating, so a request never waits on a scan once warm).
     const warmActivity = async () => {
         try {
             const t0 = Date.now();
-            await getActivity();
+            await refreshActivity();
             console.log(`[activity] cache refreshed in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
         } catch (err) {
             console.error("[activity] background refresh failed:", err.message);
         }
     };
     warmActivity();
-    setInterval(warmActivity, Math.max(CONFIG.cacheTtlSeconds * 2, 120) * 1000).unref();
+    setInterval(warmActivity, CONFIG.cacheTtlSeconds * 1000).unref();
 });
 
 for (const sig of ["SIGINT", "SIGTERM"]) {

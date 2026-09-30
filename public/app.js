@@ -102,15 +102,22 @@ function setStatus(state, text) {
     $("status-text").textContent = text;
 }
 
-function showError(msg) {
-    const el = $("error-banner");
-    el.textContent = msg;
-    el.classList.remove("hidden");
-    setStatus("err", "Error");
-}
+// Current failure per data source; the banner and status pill reflect all of
+// them, so one source recovering doesn't hide the other's ongoing error.
+const loadErrors = { stats: null, activity: null };
 
-function clearError() {
-    $("error-banner").classList.add("hidden");
+function setLoadError(source, msg) {
+    loadErrors[source] = msg;
+    const active = Object.values(loadErrors).filter(Boolean);
+    const el = $("error-banner");
+    if (active.length > 0) {
+        el.textContent = active.join(" \u2014 ");
+        el.classList.remove("hidden");
+        setStatus("err", "Error");
+    } else {
+        el.classList.add("hidden");
+        if (lastStatsAt) setStatus("ok", `Live${liveSuffix} · updated ${timeAgo(lastStatsAt)}`);
+    }
 }
 
 async function fetchJson(url) {
@@ -263,7 +270,12 @@ function bucketClickHandler(isClientsChart) {
         let client = null;
         if (isClientsChart) {
             const hit = chart.getElementsAtEventForMode(evt, "nearest", { intersect: true }, true);
-            if (hit.length > 0) client = chart.data.datasets[hit[0].datasetIndex].label;
+            if (hit.length > 0) {
+                const dsIndex = hit[0].datasetIndex;
+                // The merged "Other clients" row isn't a real client; show everyone instead.
+                const isOtherRow = activityData.clients.hasOther && dsIndex === chart.data.datasets.length - 1;
+                if (!isOtherRow) client = chart.data.datasets[dsIndex].label;
+            }
         }
         openRequestsPage(start, end, client);
     };
@@ -412,14 +424,13 @@ function renderStats(stats) {
 
 /* ---------------- Data loading ---------------- */
 
-async function loadStats(firstLoad = false) {
+async function loadStats() {
     try {
         const stats = await fetchJson("/api/stats");
         renderStats(stats);
-        clearError();
-        if (firstLoad) setStatus("ok", `Live${liveSuffix}`);
+        setLoadError("stats", null);
     } catch (err) {
-        showError(`Failed to load stats: ${err.message}`);
+        setLoadError("stats", `Failed to load stats: ${err.message}`);
     }
 }
 
@@ -427,8 +438,9 @@ async function loadActivity(firstLoad = false) {
     try {
         const data = await fetchJson("/api/activity");
         updateCharts(data, firstLoad);
+        setLoadError("activity", null);
     } catch (err) {
-        showError(`Failed to load query-log activity: ${err.message}`);
+        setLoadError("activity", `Failed to load query-log activity: ${err.message}`);
     }
 }
 
@@ -470,7 +482,7 @@ colorSchemeMedia.addEventListener("change", (e) => {
 
 /* ---------------- Boot & refresh timers ---------------- */
 
-loadStats(true);
+loadStats();
 loadActivity(true);
 setInterval(loadStats, STATS_REFRESH_MS);
 setInterval(loadActivity, ACTIVITY_REFRESH_MS);

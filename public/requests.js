@@ -45,6 +45,10 @@ function showError(msg) {
     el.classList.remove("hidden");
 }
 
+// Caveats about the loaded window (truncation, missing servers), kept so they
+// survive re-rendering the subtitle when the client filter changes.
+let windowNotes = [];
+
 function readParams() {
     const p = new URLSearchParams(location.search);
     const start = Number(p.get("start"));
@@ -87,7 +91,8 @@ function applyClientFilter(allRows, client) {
     const params = readParams();
     $("requests-title").textContent = client ? `Requests — ${client}` : "Requests";
     $("requests-sub").innerHTML =
-        `${fmtRange(params.start, params.end)} &middot; ${filtered.length} request${filtered.length === 1 ? "" : "s"}`;
+        `${fmtRange(params.start, params.end)} &middot; ${filtered.length} request${filtered.length === 1 ? "" : "s"}` +
+        windowNotes.map((n) => ` &middot; ${escapeHtml(n)}`).join("");
 
     const url = new URL(location.href);
     if (client) url.searchParams.set("client", client);
@@ -147,13 +152,23 @@ async function load() {
         const allRows = data.requests || [];
         const effectiveClient = params.client && allRows.some((r) => r.client === params.client) ? params.client : "";
 
+        const notes = [];
+        if (data.truncated) {
+            notes.push(`showing the first ${data.count.toLocaleString()} of ${data.totalCount.toLocaleString()} requests`);
+        }
+        const servers = (data.meta && data.meta.servers) || [];
+        const down = servers.filter((s) => !s.ok).map((s) => s.name);
+        if (down.length > 0) {
+            notes.push(`unavailable: ${down.join(", ")}`);
+        } else if (data.meta && !data.meta.complete) {
+            // Every server answered, but paging hit activity.maxPages before
+            // reaching the start of this window.
+            notes.push("older part of this window may be missing (query-log paging limit reached)");
+        }
+        windowNotes = notes;
+
         renderClientFilter(allRows, effectiveClient);
         applyClientFilter(allRows, effectiveClient);
-
-        if (data.meta && !data.meta.complete) {
-            const sub = $("requests-sub");
-            sub.innerHTML += " &middot; some servers unavailable";
-        }
     } catch (err) {
         showError(`Failed to load requests: ${err.message}`);
     } finally {
